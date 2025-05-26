@@ -67,7 +67,11 @@ static void MX_TIM4_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#define ADC_BUF_SIZE 64
+uint16_t adc_buf[ADC_BUF_SIZE];			//buffer where DMA stores ADC samples
 
+volatile uint8_t adc_ready = 0;			//flag, set when ADC+DMA finish
+volatile uint8_t pulse_counter = 0;		//counter for 58kHz pulse
 /* USER CODE END 0 */
 
 /**
@@ -106,6 +110,23 @@ int main(void)
   MX_ADC1_Init();
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
+  // Start ADC in DMA mode (conversion will begin only on TIM4 trigger)
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_SIZE);
+
+  // Start TIM2 PWM with interrupt enabled (we stop it manually after 3 pulses)
+  HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_4);
+  __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_UPDATE);
+
+  // Start TIM1 (master timer — triggers TIM2 + TIM4 via ITR0)
+  HAL_TIM_Base_Start_IT(&htim1);
+
+  // Start TIM4 in one-pulse mode (slave timer for ADC trigger)
+  HAL_TIM_Base_Start_IT(&htim4);
+
+  // Start TIM5 as a free-running stopwatch for debugging timing
+  HAL_TIM_Base_Start_IT(&htim5);
+
+  //HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);
 
   /* USER CODE END 2 */
 
@@ -116,6 +137,17 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	  if (adc_ready)
+	  {
+
+	      adc_ready = 0;
+
+	      // Optional: process adc_buf[] here
+	      // e.g. find echo peak, average, or log to UART
+
+	      // Restart TIM2 for next cycle (re-arm for 3 new pulses)
+	      HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_4);
+	  }
   }
   /* USER CODE END 3 */
 }
@@ -318,14 +350,14 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
+  sConfigOC.Pulse = 750;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
@@ -333,7 +365,7 @@ static void MX_TIM2_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM2_Init 2 */
-
+  //HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
   /* USER CODE END TIM2_Init 2 */
   HAL_TIM_MspPostInit(&htim2);
 
@@ -477,7 +509,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LD1_Pin|LD3_Pin|LD2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|LD3_Pin|GPIO_PIN_7, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOG, GPIO_PIN_6, GPIO_PIN_RESET);
@@ -496,6 +531,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : PA0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
   /*Configure GPIO pins : RMII_REF_CLK_Pin RMII_MDIO_Pin RMII_CRS_DV_Pin */
   GPIO_InitStruct.Pin = RMII_REF_CLK_Pin|RMII_MDIO_Pin|RMII_CRS_DV_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
@@ -504,8 +546,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LD1_Pin LD3_Pin LD2_Pin */
-  GPIO_InitStruct.Pin = LD1_Pin|LD3_Pin|LD2_Pin;
+  /*Configure GPIO pins : PB0 LD3_Pin PB7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|LD3_Pin|GPIO_PIN_7;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -568,7 +610,65 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
 
+	if (htim->Instance == TIM2)
+    {
+		//HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
+
+        pulse_counter++;
+
+        if (pulse_counter >= 3)
+        {
+            HAL_TIM_PWM_Stop_IT(&htim2, TIM_CHANNEL_4);
+            pulse_counter = 0;
+            //HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7); // PA5 = TIM1 indicator
+        }
+        //HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7); // PA5 = TIM1 indicator
+    }
+
+    if (htim->Instance == TIM1)
+    {
+        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7); // PA5 = TIM1 indicator
+    	HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);
+    }
+
+    /*if (htim->Instance == TIM2 && pulse_counter == 0)
+    {
+		//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7); // PA5 = TIM1 indicator
+    	//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14); // LD3 red LED
+		HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_0);
+	}*/
+        //HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET); // PB0 on start*/
+
+
+    //if (htim->Instance == TIM2 && pulse_counter >= 3) {
+    //    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET); // PB0 off after 3 pulses
+	// }
+
+    if (htim->Instance == TIM4)
+    {
+    		//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7); // PA5 = TIM1 indicator
+        	HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14); // LD3 red LED
+    		HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_0);
+    }//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14); // LD3 red LED
+
+    if (hadc1.Instance == ADC1)
+    {
+        //HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14); // LD3 red LED
+        adc_ready = 1;
+    }
+
+}
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+    if (hadc->Instance == ADC1)
+    {
+        adc_ready = 1;
+    }
+}
 /* USER CODE END 4 */
 
 /**
